@@ -11,6 +11,10 @@ interface TodoistTask {
     datetime?: string;
     string: string;
   };
+  duration?: {
+    amount: number;
+    unit: 'minute' | 'day';
+  };
   project_id: string;
   labels: string[];
   is_completed: boolean;
@@ -58,7 +62,8 @@ function verifySlackSignature(
 }
 
 async function fetchTodayTasks(apiToken: string): Promise<TodoistTask[]> {
-  const response = await fetch('https://api.todoist.com/rest/v2/tasks?filter=today', {
+  const filter = encodeURIComponent('today & #Work');
+  const response = await fetch(`https://api.todoist.com/rest/v2/tasks?filter=${filter}`, {
     headers: {
       'Authorization': `Bearer ${apiToken}`,
     },
@@ -71,14 +76,27 @@ async function fetchTodayTasks(apiToken: string): Promise<TodoistTask[]> {
   return response.json() as Promise<TodoistTask[]>;
 }
 
-function getPriorityEmoji(priority: number): string {
+function getPriorityLabel(priority: number): string {
   // Todoist priority: 4 = highest (p1), 1 = lowest (p4)
   switch (priority) {
-    case 4: return '🔴';
-    case 3: return '🟠';
-    case 2: return '🔵';
-    default: return '⚪';
+    case 4: return '🔥P1';
+    case 3: return '⚡P2';
+    case 2: return '📌P3';
+    default: return '';
   }
+}
+
+function formatDuration(duration?: { amount: number; unit: 'minute' | 'day' }): string {
+  if (!duration) return '';
+  if (duration.unit === 'day') {
+    return ` ⏱️${duration.amount}d`;
+  }
+  if (duration.amount >= 60) {
+    const hours = Math.floor(duration.amount / 60);
+    const mins = duration.amount % 60;
+    return mins > 0 ? ` ⏱️${hours}h${mins}m` : ` ⏱️${hours}h`;
+  }
+  return ` ⏱️${duration.amount}m`;
 }
 
 function formatTasksForSlack(tasks: TodoistTask[]): SlackResponse {
@@ -99,11 +117,13 @@ function formatTasksForSlack(tasks: TodoistTask[]): SlackResponse {
   }
 
   const taskLines = tasks.map((task) => {
-    const priority = getPriorityEmoji(task.priority);
+    const priority = getPriorityLabel(task.priority);
+    const priorityStr = priority ? ` [${priority}]` : '';
     const dueTime = task.due?.datetime
       ? ` _(${new Date(task.due.datetime).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })})_`
       : '';
-    return `${priority} ${task.content}${dueTime}`;
+    const duration = formatDuration(task.duration);
+    return `• ${task.content}${priorityStr}${duration}${dueTime}`;
   });
 
   const blocks: SlackBlock[] = [
@@ -157,7 +177,12 @@ export const handler = async (
   // Verify Slack signature
   const signature = event.headers['x-slack-signature'] ?? '';
   const timestamp = event.headers['x-slack-request-timestamp'] ?? '';
-  const body = event.body ?? '';
+
+  // API Gateway may base64-encode the body
+  let body = event.body ?? '';
+  if (event.isBase64Encoded && body) {
+    body = Buffer.from(body, 'base64').toString('utf-8');
+  }
 
   if (!verifySlackSignature(slackSigningSecret, signature, timestamp, body)) {
     console.error('Invalid Slack signature');
