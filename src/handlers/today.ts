@@ -158,7 +158,7 @@ function formatTasksForSlack(tasks: TodoistTask[]): SlackResponse {
       elements: [
         {
           type: 'mrkdwn',
-          text: `_Fetched from Todoist at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}_`,
+          text: '_Fetched from Todoist_',
         },
       ],
     },
