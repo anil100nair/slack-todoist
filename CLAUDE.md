@@ -48,6 +48,12 @@ Slack /today → API Gateway (HTTP API) → Lambda (today.ts) → Todoist REST A
 - `TODOIST_API_TOKEN` - Personal Todoist API token
 - `SLACK_SIGNING_SECRET` - Slack app signing secret for request verification
 
+## User Authorization
+
+Access is restricted to specific Slack user IDs defined in `ALLOWED_USER_IDS` array in `src/handlers/today.ts`. Unauthorized users see a message to contact anil@beneathatree.com for access.
+
+To add a new user: add their Slack member ID to the `ALLOWED_USER_IDS` array and redeploy.
+
 ## Setup Requirements
 
 1. AWS CLI configured with `beneathatree-cli` profile
