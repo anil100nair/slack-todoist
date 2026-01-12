@@ -1,0 +1,55 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Slack slash command integration with Todoist
+
+Globals:
+  Function:
+    Timeout: 10
+    Runtime: nodejs20.x
+    MemorySize: 256
+    Architectures:
+      - arm64
+
+Parameters:
+  TodoistApiToken:
+    Type: String
+    Description: Todoist API token
+    NoEcho: true
+  SlackSigningSecret:
+    Type: String
+    Description: Slack app signing secret for request verification
+    NoEcho: true
+
+Resources:
+  TodayFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: today.handler
+      CodeUri: src/handlers/
+      Description: Handles /today slash command from Slack
+      Environment:
+        Variables:
+          TODOIST_API_TOKEN: !Ref TodoistApiToken
+          SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+      Events:
+        SlackCommand:
+          Type: HttpApi
+          Properties:
+            Path: /slack/today
+            Method: POST
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: true
+        Target: es2022
+        Sourcemap: true
+        EntryPoints:
+          - today.ts
+        Format: esm
+        OutExtension:
+          - .js=.mjs
+
+Outputs:
+  TodayApiEndpoint:
+    Description: API Gateway endpoint URL for the /today command
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/slack/today"

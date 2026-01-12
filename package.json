@@ -1,0 +1,25 @@
+{
+  "name": "slack-todoist-integration",
+  "version": "1.0.0",
+  "description": "Slack slash command to fetch Todoist tasks",
+  "type": "module",
+  "scripts": {
+    "build": "sam build",
+    "deploy": "sam deploy --guided",
+    "deploy:prod": "sam deploy",
+    "local": "sam local invoke TodayFunction --event events/today.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src/**/*.ts"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "eslint": "^9.16.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.17.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

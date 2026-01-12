@@ -1,0 +1,31 @@
+{
+  "version": "2.0",
+  "routeKey": "POST /slack/today",
+  "rawPath": "/slack/today",
+  "rawQueryString": "",
+  "headers": {
+    "content-type": "application/x-www-form-urlencoded",
+    "x-slack-signature": "v0=test_signature",
+    "x-slack-request-timestamp": "1234567890"
+  },
+  "requestContext": {
+    "accountId": "123456789012",
+    "apiId": "api-id",
+    "domainName": "id.execute-api.us-east-1.amazonaws.com",
+    "domainPrefix": "id",
+    "http": {
+      "method": "POST",
+      "path": "/slack/today",
+      "protocol": "HTTP/1.1",
+      "sourceIp": "IP",
+      "userAgent": "Slackbot"
+    },
+    "requestId": "id",
+    "routeKey": "POST /slack/today",
+    "stage": "$default",
+    "time": "12/Mar/2020:19:03:58 +0000",
+    "timeEpoch": 1583348638390
+  },
+  "body": "token=test&team_id=T0001&team_domain=example&channel_id=C2147483705&channel_name=test&user_id=U2147483697&user_name=testuser&command=%2Ftoday&text=&response_url=https%3A%2F%2Fhooks.slack.com%2Fcommands%2F1234%2F5678&trigger_id=13345224609.738474920.8088930838d88f008e0",
+  "isBase64Encoded": false
+}
