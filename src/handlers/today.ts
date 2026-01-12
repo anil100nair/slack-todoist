@@ -39,6 +39,17 @@ interface SlackResponse {
   text: string;
 }
 
+const ALLOWED_USER_IDS = ['U6AHGJPPZ'];
+
+function parseSlackBody(body: string): Record<string, string> {
+  const params = new URLSearchParams(body);
+  const result: Record<string, string> = {};
+  for (const [key, value] of params) {
+    result[key] = value;
+  }
+  return result;
+}
+
 function verifySlackSignature(
   signingSecret: string,
   signature: string,
@@ -189,6 +200,23 @@ export const handler = async (
     return {
       statusCode: 401,
       body: JSON.stringify({ text: 'Invalid request signature' }),
+    };
+  }
+
+  // Check if user is authorized
+  const slackParams = parseSlackBody(body);
+  const userId = slackParams.user_id;
+
+  if (!ALLOWED_USER_IDS.includes(userId)) {
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        response_type: 'ephemeral',
+        text: '🔒 This is a test app by Anil. Please reach out to anil@beneathatree.com if you need access.',
+      }),
     };
   }
 
