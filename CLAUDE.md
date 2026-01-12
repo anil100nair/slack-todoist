@@ -61,3 +61,14 @@ To add a new user: add their Slack member ID to the `ALLOWED_USER_IDS` array and
 3. Copy `.env.example` to `.env` and fill in secrets
 4. Slack App created with `/today` slash command pointing to deployed API Gateway URL
 5. Todoist API token from Settings > Integrations > Developer
+
+## Deployed Endpoint
+
+```
+https://fkh1vxlf10.execute-api.ap-south-1.amazonaws.com/slack/today
+```
+
+## Additional Documentation
+
+- `README.md` - Detailed setup instructions for new users
+- `ROADMAP.md` - Future feature plans (OAuth, multi-user, quick add, etc.)
