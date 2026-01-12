@@ -1,7 +1,7 @@
 {
-  "name": "slack-todoist-integration",
+  "name": "slack-todoist",
   "version": "1.0.0",
-  "description": "Slack slash command to fetch Todoist tasks",
+  "description": "Slack slash command to fetch today's Todoist tasks using AWS Lambda",
   "type": "module",
   "scripts": {
     "build": "sam build",
