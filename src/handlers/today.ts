@@ -4,6 +4,7 @@ import { createHmac, timingSafeEqual } from 'crypto';
 // Constants
 const ALLOWED_USER_IDS = ['U6AHGJPPZ'];
 const TODOIST_API_BASE = 'https://api.todoist.com/rest/v2';
+const TODOIST_SYNC_API = 'https://api.todoist.com/sync/v9';
 const SIGNATURE_MAX_AGE_SECONDS = 300;
 
 // Types
@@ -26,6 +27,33 @@ interface TodoistTask {
   project_id: string;
   labels: string[];
   is_completed: boolean;
+}
+
+interface CompletedTaskItem {
+  due?: {
+    date: string;
+    datetime?: string;
+  };
+  duration?: TaskDuration;
+  priority: number;
+}
+
+interface CompletedTask {
+  id: string;
+  task_id: string;
+  content: string;
+  project_id: string;
+  completed_at: string;
+  item_object?: CompletedTaskItem;
+}
+
+interface CompletedTasksResponse {
+  items: CompletedTask[];
+}
+
+interface TodoistProject {
+  id: string;
+  name: string;
 }
 
 interface SlackBlock {
@@ -90,6 +118,52 @@ async function fetchTodayTasks(apiToken: string): Promise<TodoistTask[]> {
   return response.json() as Promise<TodoistTask[]>;
 }
 
+function getTodayDateRange(): { since: string; until: string } {
+  const now = new Date();
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
+  return {
+    since: startOfDay.toISOString(),
+    until: endOfDay.toISOString(),
+  };
+}
+
+async function fetchWorkProjectId(apiToken: string): Promise<string | null> {
+  const url = `${TODOIST_API_BASE}/projects`;
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiToken}` },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Todoist API error: ${response.status} ${response.statusText}`);
+  }
+
+  const projects = (await response.json()) as TodoistProject[];
+  const workProject = projects.find((p) => p.name === 'Work');
+  return workProject?.id ?? null;
+}
+
+async function fetchCompletedTodayTasks(apiToken: string, projectId: string | null): Promise<CompletedTask[]> {
+  if (!projectId) {
+    return [];
+  }
+
+  const { since, until } = getTodayDateRange();
+  const url = `${TODOIST_SYNC_API}/completed/get_all?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}&project_id=${projectId}`;
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiToken}` },
+  });
+
+  if (!response.ok) {
+    throw new Error(`Todoist Sync API error: ${response.status} ${response.statusText}`);
+  }
+
+  const data = (await response.json()) as CompletedTasksResponse;
+  return data.items;
+}
+
 const PRIORITY_LABELS: Record<number, string> = {
   4: 'P1',
   3: 'P2',
@@ -126,6 +200,7 @@ function formatTime(datetime: string): string {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
+    timeZone: 'Asia/Kolkata',
   });
 }
 
@@ -142,33 +217,41 @@ function sortTasksBySchedule(tasks: TodoistTask[]): TodoistTask[] {
   return [...tasks].sort((a, b) => getTaskSortKey(a) - getTaskSortKey(b));
 }
 
-function formatScheduledTask(task: TodoistTask): string {
-  const time = task.due?.datetime ? formatTime(task.due.datetime) : '';
+function formatActiveTask(task: TodoistTask, index: number): string {
+  const time = task.due?.datetime ? `\`${formatTime(task.due.datetime)}\` ` : '';
   const duration = formatDuration(task.duration);
   const priority = getPriorityLabel(task.priority);
+  const content = stripLabels(task.content);
 
   const meta: string[] = [];
   if (duration) meta.push(duration);
   if (priority) meta.push(priority);
 
   const metaStr = meta.length > 0 ? ` — _${meta.join(' · ')}_` : '';
-  return `\`${time}\` ${task.content}${metaStr}`;
+  return `${index + 1}. ${time}${content}${metaStr}`;
 }
 
-function formatUnscheduledTask(task: TodoistTask): string {
-  const duration = formatDuration(task.duration);
-  const priority = getPriorityLabel(task.priority);
-
-  const meta: string[] = [];
-  if (duration) meta.push(duration);
-  if (priority) meta.push(priority);
-
-  const metaStr = meta.length > 0 ? ` — _${meta.join(' · ')}_` : '';
-  return `• ${task.content}${metaStr}`;
+function stripLabels(content: string): string {
+  return content.replace(/@\w+/g, '').replace(/\s+/g, ' ').trim();
 }
 
-function formatTasksForSlack(tasks: TodoistTask[]): SlackResponse {
-  if (tasks.length === 0) {
+function formatCompletedTask(task: CompletedTask, index: number): string {
+  const completedTime = formatTime(task.completed_at);
+  const content = stripLabels(task.content);
+  return `${index + 1}. ~${content}~ — _done ${completedTime}_`;
+}
+
+interface TasksData {
+  active: TodoistTask[];
+  completed: CompletedTask[];
+}
+
+function formatTasksForSlack(data: TasksData): SlackResponse {
+  const { active, completed } = data;
+  const totalActive = active.length;
+  const totalCompleted = completed.length;
+
+  if (totalActive === 0 && totalCompleted === 0) {
     return {
       response_type: 'ephemeral',
       text: 'No tasks for today!',
@@ -184,41 +267,46 @@ function formatTasksForSlack(tasks: TodoistTask[]): SlackResponse {
     };
   }
 
-  const sortedTasks = sortTasksBySchedule(tasks);
+  const sortedTasks = sortTasksBySchedule(active);
   const scheduled = sortedTasks.filter((t) => t.due?.datetime);
   const unscheduled = sortedTasks.filter((t) => !t.due?.datetime);
+
+  const headerParts: string[] = [];
+  if (totalActive > 0) headerParts.push(`${totalActive} pending`);
+  if (totalCompleted > 0) headerParts.push(`${totalCompleted} done`);
 
   const blocks: SlackBlock[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `📋 *Today's Tasks* (${tasks.length})`,
+        text: `📋 *Today's Tasks* (${headerParts.join(', ')})`,
       },
     },
   ];
 
-  if (scheduled.length > 0) {
-    const scheduledLines = scheduled.map(formatScheduledTask);
+  if (totalActive > 0) {
+    const allActive = [...scheduled, ...unscheduled];
+    const taskLines = allActive.map((task, i) => formatActiveTask(task, i));
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: scheduledLines.join('\n'),
+        text: taskLines.join('\n'),
       },
     });
   }
 
-  if (unscheduled.length > 0) {
-    if (scheduled.length > 0) {
+  if (completed.length > 0) {
+    if (totalActive > 0) {
       blocks.push({ type: 'divider' });
     }
-    const unscheduledLines = unscheduled.map(formatUnscheduledTask);
+    const completedLines = completed.map((task, i) => formatCompletedTask(task, i));
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `_Anytime_\n${unscheduledLines.join('\n')}`,
+        text: completedLines.join('\n'),
       },
     });
   }
@@ -233,14 +321,11 @@ function formatTasksForSlack(tasks: TodoistTask[]): SlackResponse {
     ],
   });
 
-  const allLines = [
-    ...scheduled.map(formatScheduledTask),
-    ...unscheduled.map(formatUnscheduledTask),
-  ];
+  const allActive = [...scheduled, ...unscheduled];
 
   return {
     response_type: 'ephemeral',
-    text: `Today's Tasks (${tasks.length}): ${allLines.join(', ')}`,
+    text: `Today's Tasks (${totalActive} pending, ${totalCompleted} done): ${allActive.map((t) => t.content).join(', ')}`,
     blocks,
   };
 }
@@ -295,8 +380,12 @@ export async function handler(
   }
 
   try {
-    const tasks = await fetchTodayTasks(todoistToken);
-    return jsonResponse(200, formatTasksForSlack(tasks));
+    const workProjectId = await fetchWorkProjectId(todoistToken);
+    const [active, completed] = await Promise.all([
+      fetchTodayTasks(todoistToken),
+      fetchCompletedTodayTasks(todoistToken, workProjectId),
+    ]);
+    return jsonResponse(200, formatTasksForSlack({ active, completed }));
   } catch (error) {
     console.error('Error fetching tasks:', error);
     return slackErrorResponse(
