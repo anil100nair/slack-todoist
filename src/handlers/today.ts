@@ -29,7 +29,7 @@ interface TodoistTask {
 }
 
 interface SlackBlock {
-  type: string;
+  type: 'header' | 'section' | 'context' | 'divider';
   text?: {
     type: string;
     text: string;
@@ -91,9 +91,9 @@ async function fetchTodayTasks(apiToken: string): Promise<TodoistTask[]> {
 }
 
 const PRIORITY_LABELS: Record<number, string> = {
-  4: '🔥P1',
-  3: '⚡P2',
-  2: '📌P3',
+  4: 'P1',
+  3: 'P2',
+  2: 'P3',
 };
 
 function getPriorityLabel(priority: number): string {
@@ -106,86 +106,141 @@ function formatDuration(duration?: TaskDuration): string {
   }
 
   if (duration.unit === 'day') {
-    return ` ⏱️${duration.amount}d`;
+    return `${duration.amount}d`;
   }
 
   const hours = Math.floor(duration.amount / 60);
   const minutes = duration.amount % 60;
 
   if (hours === 0) {
-    return ` ⏱️${minutes}m`;
+    return `${minutes}m`;
   }
   if (minutes === 0) {
-    return ` ⏱️${hours}h`;
+    return `${hours}h`;
   }
-  return ` ⏱️${hours}h${minutes}m`;
+  return `${hours}h${minutes}m`;
 }
 
-function formatDueTime(datetime: string): string {
-  const time = new Date(datetime).toLocaleTimeString('en-US', {
-    hour: 'numeric',
+function formatTime(datetime: string): string {
+  return new Date(datetime).toLocaleTimeString('en-GB', {
+    hour: '2-digit',
     minute: '2-digit',
+    hour12: false,
   });
-  return ` _(${time})_`;
 }
 
-function formatTaskLine(task: TodoistTask): string {
-  const priority = getPriorityLabel(task.priority);
-  const priorityStr = priority ? ` [${priority}]` : '';
-  const dueTime = task.due?.datetime ? formatDueTime(task.due.datetime) : '';
-  const duration = formatDuration(task.duration);
+function getTaskSortKey(task: TodoistTask): number {
+  // Tasks with datetime come first, sorted by time
+  // Tasks without datetime go to the end
+  if (task.due?.datetime) {
+    return new Date(task.due.datetime).getTime();
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
 
-  return `• ${task.content}${priorityStr}${duration}${dueTime}`;
+function sortTasksBySchedule(tasks: TodoistTask[]): TodoistTask[] {
+  return [...tasks].sort((a, b) => getTaskSortKey(a) - getTaskSortKey(b));
+}
+
+function formatScheduledTask(task: TodoistTask): string {
+  const time = task.due?.datetime ? formatTime(task.due.datetime) : '';
+  const duration = formatDuration(task.duration);
+  const priority = getPriorityLabel(task.priority);
+
+  const meta: string[] = [];
+  if (duration) meta.push(duration);
+  if (priority) meta.push(priority);
+
+  const metaStr = meta.length > 0 ? ` — _${meta.join(' · ')}_` : '';
+  return `\`${time}\` ${task.content}${metaStr}`;
+}
+
+function formatUnscheduledTask(task: TodoistTask): string {
+  const duration = formatDuration(task.duration);
+  const priority = getPriorityLabel(task.priority);
+
+  const meta: string[] = [];
+  if (duration) meta.push(duration);
+  if (priority) meta.push(priority);
+
+  const metaStr = meta.length > 0 ? ` — _${meta.join(' · ')}_` : '';
+  return `• ${task.content}${metaStr}`;
 }
 
 function formatTasksForSlack(tasks: TodoistTask[]): SlackResponse {
   if (tasks.length === 0) {
     return {
       response_type: 'ephemeral',
-      text: 'No tasks for today! 🎉',
+      text: 'No tasks for today!',
       blocks: [
         {
           type: 'section',
           text: {
             type: 'mrkdwn',
-            text: '*No tasks for today!* 🎉\nEnjoy your free time or add some tasks in Todoist.',
+            text: '*No tasks for today!*\nEnjoy your free time or add some tasks in Todoist.',
           },
         },
       ],
     };
   }
 
-  const taskLines = tasks.map(formatTaskLine);
+  const sortedTasks = sortTasksBySchedule(tasks);
+  const scheduled = sortedTasks.filter((t) => t.due?.datetime);
+  const unscheduled = sortedTasks.filter((t) => !t.due?.datetime);
+
   const blocks: SlackBlock[] = [
-    {
-      type: 'header',
-      text: {
-        type: 'plain_text',
-        text: `📋 Today's Tasks (${tasks.length})`,
-        emoji: true,
-      },
-    },
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: taskLines.join('\n'),
+        text: `📋 *Today's Tasks* (${tasks.length})`,
       },
     },
-    {
-      type: 'context',
-      elements: [
-        {
-          type: 'mrkdwn',
-          text: '_Fetched from Todoist_',
-        },
-      ],
-    },
+  ];
+
+  if (scheduled.length > 0) {
+    const scheduledLines = scheduled.map(formatScheduledTask);
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: scheduledLines.join('\n'),
+      },
+    });
+  }
+
+  if (unscheduled.length > 0) {
+    if (scheduled.length > 0) {
+      blocks.push({ type: 'divider' });
+    }
+    const unscheduledLines = unscheduled.map(formatUnscheduledTask);
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `_Anytime_\n${unscheduledLines.join('\n')}`,
+      },
+    });
+  }
+
+  blocks.push({
+    type: 'context',
+    elements: [
+      {
+        type: 'mrkdwn',
+        text: '_Fetched from Todoist_',
+      },
+    ],
+  });
+
+  const allLines = [
+    ...scheduled.map(formatScheduledTask),
+    ...unscheduled.map(formatUnscheduledTask),
   ];
 
   return {
     response_type: 'ephemeral',
-    text: `Today's Tasks (${tasks.length}): ${taskLines.join(', ')}`,
+    text: `Today's Tasks (${tasks.length}): ${allLines.join(', ')}`,
     blocks,
   };
 }
