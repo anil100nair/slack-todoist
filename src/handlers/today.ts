@@ -75,6 +75,13 @@ interface SlackResponse {
   text: string;
 }
 
+interface SlackUserInfo {
+  ok: boolean;
+  user?: {
+    tz: string;
+  };
+}
+
 function parseSlackBody(body: string): Record<string, string> {
   return Object.fromEntries(new URLSearchParams(body));
 }
@@ -174,6 +181,27 @@ function getPriorityLabel(priority: number): string {
   return PRIORITY_LABELS[priority] ?? '';
 }
 
+async function fetchUserTimezone(botToken: string, userId: string): Promise<string> {
+  const url = `https://slack.com/api/users.info?user=${userId}`;
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${botToken}` },
+  });
+
+  if (!response.ok) {
+    console.error(`Slack API error: ${response.status}`);
+    return 'UTC';
+  }
+
+  const data = (await response.json()) as SlackUserInfo;
+  if (!data.ok || !data.user?.tz) {
+    console.error('Failed to get user timezone from Slack');
+    return 'UTC';
+  }
+
+  return data.user.tz;
+}
+
 function formatDuration(duration?: TaskDuration): string {
   if (!duration) {
     return '';
@@ -195,12 +223,30 @@ function formatDuration(duration?: TaskDuration): string {
   return `${hours}h${minutes}m`;
 }
 
-function formatTime(datetime: string): string {
+function formatTime(datetime: string, timezone: string): string {
+  // Todoist returns datetime in two formats:
+  // - With Z suffix (UTC): needs timezone conversion
+  // - Without Z suffix (floating): already in user's Todoist timezone, extract time directly
+  if (datetime.endsWith('Z')) {
+    return new Date(datetime).toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: timezone,
+    });
+  }
+
+  // Floating time - extract HH:MM directly from the ISO string
+  const timeMatch = datetime.match(/T(\d{2}):(\d{2})/);
+  if (timeMatch) {
+    return `${timeMatch[1]}:${timeMatch[2]}`;
+  }
+
+  // Fallback: parse and format without conversion
   return new Date(datetime).toLocaleTimeString('en-GB', {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-    timeZone: 'Asia/Kolkata',
   });
 }
 
@@ -217,8 +263,8 @@ function sortTasksBySchedule(tasks: TodoistTask[]): TodoistTask[] {
   return [...tasks].sort((a, b) => getTaskSortKey(a) - getTaskSortKey(b));
 }
 
-function formatActiveTask(task: TodoistTask, index: number): string {
-  const time = task.due?.datetime ? `\`${formatTime(task.due.datetime)}\` ` : '';
+function formatActiveTask(task: TodoistTask, index: number, timezone: string): string {
+  const time = task.due?.datetime ? `\`${formatTime(task.due.datetime, timezone)}\` ` : '';
   const duration = formatDuration(task.duration);
   const priority = getPriorityLabel(task.priority);
   const content = stripLabels(task.content);
@@ -235,8 +281,8 @@ function stripLabels(content: string): string {
   return content.replace(/@\w+/g, '').replace(/\s+/g, ' ').trim();
 }
 
-function formatCompletedTask(task: CompletedTask, index: number): string {
-  const completedTime = formatTime(task.completed_at);
+function formatCompletedTask(task: CompletedTask, index: number, timezone: string): string {
+  const completedTime = formatTime(task.completed_at, timezone);
   const content = stripLabels(task.content);
   return `${index + 1}. ~${content}~ — _done ${completedTime}_`;
 }
@@ -244,10 +290,11 @@ function formatCompletedTask(task: CompletedTask, index: number): string {
 interface TasksData {
   active: TodoistTask[];
   completed: CompletedTask[];
+  timezone: string;
 }
 
 function formatTasksForSlack(data: TasksData): SlackResponse {
-  const { active, completed } = data;
+  const { active, completed, timezone } = data;
   const totalActive = active.length;
   const totalCompleted = completed.length;
 
@@ -287,7 +334,7 @@ function formatTasksForSlack(data: TasksData): SlackResponse {
 
   if (totalActive > 0) {
     const allActive = [...scheduled, ...unscheduled];
-    const taskLines = allActive.map((task, i) => formatActiveTask(task, i));
+    const taskLines = allActive.map((task, i) => formatActiveTask(task, i, timezone));
     blocks.push({
       type: 'section',
       text: {
@@ -301,7 +348,7 @@ function formatTasksForSlack(data: TasksData): SlackResponse {
     if (totalActive > 0) {
       blocks.push({ type: 'divider' });
     }
-    const completedLines = completed.map((task, i) => formatCompletedTask(task, i));
+    const completedLines = completed.map((task, i) => formatCompletedTask(task, i, timezone));
     blocks.push({
       type: 'section',
       text: {
@@ -355,8 +402,9 @@ export async function handler(
 ): Promise<APIGatewayProxyResultV2> {
   const todoistToken = process.env.TODOIST_API_TOKEN;
   const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
+  const slackBotToken = process.env.SLACK_BOT_TOKEN;
 
-  if (!todoistToken || !slackSigningSecret) {
+  if (!todoistToken || !slackSigningSecret || !slackBotToken) {
     console.error('Missing required environment variables');
     return jsonResponse(500, { text: 'Server configuration error' });
   }
@@ -380,12 +428,15 @@ export async function handler(
   }
 
   try {
-    const workProjectId = await fetchWorkProjectId(todoistToken);
+    const [workProjectId, timezone] = await Promise.all([
+      fetchWorkProjectId(todoistToken),
+      fetchUserTimezone(slackBotToken, userId),
+    ]);
     const [active, completed] = await Promise.all([
       fetchTodayTasks(todoistToken),
       fetchCompletedTodayTasks(todoistToken, workProjectId),
     ]);
-    return jsonResponse(200, formatTasksForSlack({ active, completed }));
+    return jsonResponse(200, formatTasksForSlack({ active, completed, timezone }));
   } catch (error) {
     console.error('Error fetching tasks:', error);
     return slackErrorResponse(

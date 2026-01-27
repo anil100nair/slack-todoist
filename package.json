@@ -6,7 +6,7 @@
   "scripts": {
     "build": "sam build",
     "predeploy": "npm run build",
-    "deploy": ". ./.env && sam deploy --parameter-overrides TodoistApiToken=$TODOIST_API_TOKEN SlackSigningSecret=$SLACK_SIGNING_SECRET",
+    "deploy": ". ./.env && sam deploy --parameter-overrides TodoistApiToken=$TODOIST_API_TOKEN SlackSigningSecret=$SLACK_SIGNING_SECRET SlackBotToken=$SLACK_BOT_TOKEN",
     "local": "sam local invoke TodayFunction --event events/today.json",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/**/*.ts"

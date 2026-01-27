@@ -19,6 +19,10 @@ Parameters:
     Type: String
     Description: Slack app signing secret for request verification
     NoEcho: true
+  SlackBotToken:
+    Type: String
+    Description: Slack Bot OAuth token for fetching user info
+    NoEcho: true
 
 Resources:
   TodayFunction:
@@ -31,6 +35,7 @@ Resources:
         Variables:
           TODOIST_API_TOKEN: !Ref TodoistApiToken
           SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+          SLACK_BOT_TOKEN: !Ref SlackBotToken
       Events:
         SlackCommand:
           Type: HttpApi
