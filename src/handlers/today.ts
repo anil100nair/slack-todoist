@@ -3,8 +3,7 @@ import { createHmac, timingSafeEqual } from 'crypto';
 
 // Constants
 const ALLOWED_USER_IDS = ['U6AHGJPPZ'];
-const TODOIST_API_BASE = 'https://api.todoist.com/rest/v2';
-const TODOIST_SYNC_API = 'https://api.todoist.com/sync/v9';
+const TODOIST_API_BASE = 'https://api.todoist.com/api/v1';
 const SIGNATURE_MAX_AGE_SECONDS = 300;
 
 // Types
@@ -19,9 +18,11 @@ interface TodoistTask {
   description: string;
   priority: number;
   due?: {
-    date: string;
-    datetime?: string;
+    date: string;   // YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS (floating) or YYYY-MM-DDTHH:MM:SSZ (UTC)
+    timezone: string | null;
     string: string;
+    is_recurring?: boolean;
+    lang?: string;
   };
   duration?: TaskDuration;
   project_id: string;
@@ -51,10 +52,6 @@ interface CompletedTasksResponse {
   items: CompletedTask[];
 }
 
-interface TodoistProject {
-  id: string;
-  name: string;
-}
 
 interface SlackBlock {
   type: 'header' | 'section' | 'context' | 'divider';
@@ -111,7 +108,7 @@ function verifySlackSignature(
 }
 
 async function fetchTodayTasks(apiToken: string): Promise<TodoistTask[]> {
-  const filter = encodeURIComponent('today & #Work');
+  const filter = encodeURIComponent('today');
   const url = `${TODOIST_API_BASE}/tasks?filter=${filter}`;
 
   const response = await fetch(url, {
@@ -122,7 +119,8 @@ async function fetchTodayTasks(apiToken: string): Promise<TodoistTask[]> {
     throw new Error(`Todoist API error: ${response.status} ${response.statusText}`);
   }
 
-  return response.json() as Promise<TodoistTask[]>;
+  const data = await response.json() as { results: TodoistTask[] };
+  return data.results;
 }
 
 function getTodayDateRange(): { since: string; until: string } {
@@ -135,8 +133,9 @@ function getTodayDateRange(): { since: string; until: string } {
   };
 }
 
-async function fetchWorkProjectId(apiToken: string): Promise<string | null> {
-  const url = `${TODOIST_API_BASE}/projects`;
+async function fetchCompletedTodayTasks(apiToken: string): Promise<CompletedTask[]> {
+  const { since, until } = getTodayDateRange();
+  const url = `${TODOIST_API_BASE}/tasks/completed?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
 
   const response = await fetch(url, {
     headers: { Authorization: `Bearer ${apiToken}` },
@@ -144,27 +143,6 @@ async function fetchWorkProjectId(apiToken: string): Promise<string | null> {
 
   if (!response.ok) {
     throw new Error(`Todoist API error: ${response.status} ${response.statusText}`);
-  }
-
-  const projects = (await response.json()) as TodoistProject[];
-  const workProject = projects.find((p) => p.name === 'Work');
-  return workProject?.id ?? null;
-}
-
-async function fetchCompletedTodayTasks(apiToken: string, projectId: string | null): Promise<CompletedTask[]> {
-  if (!projectId) {
-    return [];
-  }
-
-  const { since, until } = getTodayDateRange();
-  const url = `${TODOIST_SYNC_API}/completed/get_all?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}&project_id=${projectId}`;
-
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${apiToken}` },
-  });
-
-  if (!response.ok) {
-    throw new Error(`Todoist Sync API error: ${response.status} ${response.statusText}`);
   }
 
   const data = (await response.json()) as CompletedTasksResponse;
@@ -250,11 +228,19 @@ function formatTime(datetime: string, timezone: string): string {
   });
 }
 
+function getTodayDateString(): string {
+  return new Date().toISOString().substring(0, 10);
+}
+
+function getTaskDatetime(task: TodoistTask): string | undefined {
+  const date = task.due?.date;
+  return date?.includes('T') ? date : undefined;
+}
+
 function getTaskSortKey(task: TodoistTask): number {
-  // Tasks with datetime come first, sorted by time
-  // Tasks without datetime go to the end
-  if (task.due?.datetime) {
-    return new Date(task.due.datetime).getTime();
+  const datetime = getTaskDatetime(task);
+  if (datetime) {
+    return new Date(datetime).getTime();
   }
   return Number.MAX_SAFE_INTEGER;
 }
@@ -263,22 +249,59 @@ function sortTasksBySchedule(tasks: TodoistTask[]): TodoistTask[] {
   return [...tasks].sort((a, b) => getTaskSortKey(a) - getTaskSortKey(b));
 }
 
-function formatActiveTask(task: TodoistTask, index: number, timezone: string): string {
-  const time = task.due?.datetime ? `\`${formatTime(task.due.datetime, timezone)}\` ` : '';
-  const duration = formatDuration(task.duration);
-  const priority = getPriorityLabel(task.priority);
-  const content = stripLabels(task.content);
+function categorizeTasks(tasks: TodoistTask[]): { today: TodoistTask[]; overdue: TodoistTask[] } {
+  const todayStr = getTodayDateString();
+  const today: TodoistTask[] = [];
+  const overdue: TodoistTask[] = [];
 
-  const meta: string[] = [];
-  if (duration) meta.push(duration);
-  if (priority) meta.push(priority);
+  for (const task of tasks) {
+    if (!task.due) continue;
+    const taskDate = task.due.date.substring(0, 10);
+    if (taskDate === todayStr) {
+      today.push(task);
+    } else if (taskDate < todayStr) {
+      overdue.push(task);
+    }
+    // future-dated tasks (e.g. next occurrence of overdue recurring tasks): exclude
+  }
 
-  const metaStr = meta.length > 0 ? ` — _${meta.join(' · ')}_` : '';
-  return `${index + 1}. ${time}${content}${metaStr}`;
+  return { today, overdue };
+}
+
+function formatOverdueLabel(dateStr: string): string {
+  const todayStr = getTodayDateString();
+  const daysAgo = Math.round(
+    (new Date(todayStr).getTime() - new Date(dateStr).getTime()) / (24 * 60 * 60 * 1000)
+  );
+  if (daysAgo === 1) return 'yesterday';
+  if (daysAgo < 7) return `${daysAgo}d ago`;
+  return new Date(dateStr).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
 function stripLabels(content: string): string {
   return content.replace(/@\w+/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function formatTaskMeta(duration: TaskDuration | undefined, priority: number): string {
+  const meta: string[] = [];
+  const d = formatDuration(duration);
+  const p = getPriorityLabel(priority);
+  if (d) meta.push(d);
+  if (p) meta.push(p);
+  return meta.length > 0 ? ` — _${meta.join(' · ')}_` : '';
+}
+
+function formatTodayTask(task: TodoistTask, index: number, timezone: string): string {
+  const datetime = getTaskDatetime(task);
+  const time = datetime ? `\`${formatTime(datetime, timezone)}\` ` : '';
+  const content = stripLabels(task.content);
+  return `${index + 1}. ${time}${content}${formatTaskMeta(task.duration, task.priority)}`;
+}
+
+function formatOverdueTask(task: TodoistTask, index: number): string {
+  const label = formatOverdueLabel(task.due!.date.substring(0, 10));
+  const content = stripLabels(task.content);
+  return `${index + 1}. _${label}_ ${content}${formatTaskMeta(task.duration, task.priority)}`;
 }
 
 function formatCompletedTask(task: CompletedTask, index: number, timezone: string): string {
@@ -288,17 +311,16 @@ function formatCompletedTask(task: CompletedTask, index: number, timezone: strin
 }
 
 interface TasksData {
-  active: TodoistTask[];
+  today: TodoistTask[];
+  overdue: TodoistTask[];
   completed: CompletedTask[];
   timezone: string;
 }
 
 function formatTasksForSlack(data: TasksData): SlackResponse {
-  const { active, completed, timezone } = data;
-  const totalActive = active.length;
-  const totalCompleted = completed.length;
+  const { today, overdue, completed, timezone } = data;
 
-  if (totalActive === 0 && totalCompleted === 0) {
+  if (today.length === 0 && overdue.length === 0 && completed.length === 0) {
     return {
       response_type: 'ephemeral',
       text: 'No tasks for today!',
@@ -314,65 +336,63 @@ function formatTasksForSlack(data: TasksData): SlackResponse {
     };
   }
 
-  const sortedTasks = sortTasksBySchedule(active);
-  const scheduled = sortedTasks.filter((t) => t.due?.datetime);
-  const unscheduled = sortedTasks.filter((t) => !t.due?.datetime);
-
   const headerParts: string[] = [];
-  if (totalActive > 0) headerParts.push(`${totalActive} pending`);
-  if (totalCompleted > 0) headerParts.push(`${totalCompleted} done`);
+  if (today.length > 0) headerParts.push(`${today.length} today`);
+  if (overdue.length > 0) headerParts.push(`${overdue.length} overdue`);
+  if (completed.length > 0) headerParts.push(`${completed.length} done`);
 
   const blocks: SlackBlock[] = [
     {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `📋 *Today's Tasks* (${headerParts.join(', ')})`,
+        text: `📋 *Today's Tasks* (${headerParts.join(' · ')})`,
       },
     },
   ];
 
-  if (totalActive > 0) {
-    const allActive = [...scheduled, ...unscheduled];
-    const taskLines = allActive.map((task, i) => formatActiveTask(task, i, timezone));
+  if (today.length > 0) {
+    const sorted = sortTasksBySchedule(today);
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: taskLines.join('\n'),
+        text: sorted.map((t, i) => formatTodayTask(t, i, timezone)).join('\n'),
+      },
+    });
+  }
+
+  if (overdue.length > 0) {
+    if (today.length > 0) blocks.push({ type: 'divider' });
+    const sortedOverdue = [...overdue].sort((a, b) => b.due!.date.localeCompare(a.due!.date));
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `⚠️ *Overdue*\n${sortedOverdue.map((t, i) => formatOverdueTask(t, i)).join('\n')}`,
       },
     });
   }
 
   if (completed.length > 0) {
-    if (totalActive > 0) {
-      blocks.push({ type: 'divider' });
-    }
-    const completedLines = completed.map((task, i) => formatCompletedTask(task, i, timezone));
+    if (today.length > 0 || overdue.length > 0) blocks.push({ type: 'divider' });
     blocks.push({
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: completedLines.join('\n'),
+        text: completed.map((t, i) => formatCompletedTask(t, i, timezone)).join('\n'),
       },
     });
   }
 
   blocks.push({
     type: 'context',
-    elements: [
-      {
-        type: 'mrkdwn',
-        text: '_Fetched from Todoist_',
-      },
-    ],
+    elements: [{ type: 'mrkdwn', text: '_Fetched from Todoist_' }],
   });
-
-  const allActive = [...scheduled, ...unscheduled];
 
   return {
     response_type: 'ephemeral',
-    text: `Today's Tasks (${totalActive} pending, ${totalCompleted} done): ${allActive.map((t) => t.content).join(', ')}`,
+    text: `Today's Tasks (${headerParts.join(', ')}): ${today.map((t) => t.content).join(', ')}`,
     blocks,
   };
 }
@@ -428,15 +448,13 @@ export async function handler(
   }
 
   try {
-    const [workProjectId, timezone] = await Promise.all([
-      fetchWorkProjectId(todoistToken),
+    const [timezone, allActive, completed] = await Promise.all([
       fetchUserTimezone(slackBotToken, userId),
-    ]);
-    const [active, completed] = await Promise.all([
       fetchTodayTasks(todoistToken),
-      fetchCompletedTodayTasks(todoistToken, workProjectId),
+      fetchCompletedTodayTasks(todoistToken),
     ]);
-    return jsonResponse(200, formatTasksForSlack({ active, completed, timezone }));
+    const { today, overdue } = categorizeTasks(allActive);
+    return jsonResponse(200, formatTasksForSlack({ today, overdue, completed, timezone }));
   } catch (error) {
     console.error('Error fetching tasks:', error);
     return slackErrorResponse(
